@@ -1,0 +1,160 @@
+# 工作流名称：构建和预发布
+name: 构建和预发布
+
+# 触发条件配置
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.bump_version.outputs.new_version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: 获取最新版本
+        id: get_latest
+        run: |
+          latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=${latest_tag}" >> $GITHUB_OUTPUT
+          
+      - name: 生成新版本号
+        id: bump_version
+        shell: bash
+        run: |
+          latest_tag="${{ steps.get_latest.outputs.latest_tag }}"
+          version="${latest_tag#v}"
+          major=$(echo "$version" | cut -d. -f1)
+          minor=$(echo "$version" | cut -d. -f2)
+          patch=$(echo "$version" | cut -d. -f3)
+          patch=$((patch + 1))
+          new_version="v${major}.${minor}.${patch}"
+          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
+          echo "生成新版本: ${new_version}"
+          
+      - name: 创建新标签
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          echo "正在创建标签: ${{ steps.bump_version.outputs.new_version }}"
+          git tag ${{ steps.bump_version.outputs.new_version }}
+          git push origin ${{ steps.bump_version.outputs.new_version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin, windows, freebsd]
+        arch: [amd64, arm64]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 创建必要文件
+        run: |
+          if [ ! -f "go.mod" ]; then
+            go mod init HubP
+          fi
+          touch go.sum
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.0'
+          cache: false
+
+      - name: 整理依赖
+        run: |
+          go mod tidy
+          go mod download
+          
+      - name: 构建程序
+        run: |
+          VERSION=${{ needs.version.outputs.new_version }}
+          mkdir -p release
+          binary_name="HubP"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            binary_name="${binary_name}.exe"
+          fi
+          temp_dir="release/HubP-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "${temp_dir}"
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -trimpath \
+            -ldflags="-s -w -X main.Version=${VERSION}" \
+            -o "${temp_dir}/HubP" .
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            mv "${temp_dir}/HubP" "${temp_dir}/HubP.exe"
+          fi
+          echo "编译完成，二进制文件已生成于: ${temp_dir}"
+          cd release
+          zip_name="HubP-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip"
+          zip -9 "${zip_name}" -r "$(basename ${temp_dir})"/*
+          cd ..
+          sha256sum "release/${zip_name}" | tee -a "release/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
+          
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: release/*
+          retention-days: 1
+
+  pre_release:
+    if: github.event_name != 'pull_request'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          pattern: release-*
+          merge-multiple: true
+          
+      - name: 合并校验和
+        run: |
+          mkdir -p final_release
+          find release -name "*.zip" -exec cp {} final_release/ \;
+          echo "## SHA256 校验" > final_release/checksums.txt
+          find release -name "checksums-*.txt" -exec cat {} >> final_release/checksums.txt \;
+          
+      - name: 生成预发布说明
+        run: |
+          {
+            echo "# 自动构建预发布"
+            echo ""
+            echo "## 支持平台"
+            echo "- Linux (AMD64, ARM64)"
+            echo "- macOS (AMD64, ARM64)"
+            echo "- Windows (AMD64, ARM64)"
+            echo "- FreeBSD (AMD64, ARM64)"
+            echo ""
+            cat final_release/checksums.txt
+          } > final_release/release_notes.md
+          
+      - name: 创建预发布
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.new_version }}
+          files: |
+            final_release/*.zip
+          body_path: final_release/release_notes.md
+          draft: false
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

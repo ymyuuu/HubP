@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"HubP/proxy"
-	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 )
 
@@ -79,11 +78,6 @@ Demo:
 }
 
 func main() {
-	// 加载 .env 文件中的环境变量
-	err := godotenv.Load()
-	if err != nil {
-		logrus.Warn("未找到 .env 文件，使用默认配置")
-	}
 
 	// 预处理命令行参数，将长参数转换为短参数
 	preprocessArgs()
@@ -111,7 +105,7 @@ func main() {
 	flag.StringVar(&flagDisguise, "w", "", "伪装网站 URL，例如 www.bing.com（命令行参数优先）")
 
 	// 解析命令行参数，参数错误时会显示帮助信息并退出
-	err = flag.CommandLine.Parse(os.Args[1:])
+	err := flag.CommandLine.Parse(os.Args[1:])
 	if err != nil {
 		usage()
 		os.Exit(1)

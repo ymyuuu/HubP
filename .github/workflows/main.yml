@@ -1,180 +1,415 @@
-# 工作流名称：构建和预发布
-name: 构建和预发布
+# 工作流名称：自动构建与发布流程
+# 文件位置：.github/workflows/build.yml
+#
+# 功能说明：
+# 1. 自动模式（推送到 main）：
+#    - 创建 GitHub 预发布
+#    - 推送 Docker beta 标签
+#    - 自动增加版本号
+# 
+# 2. 手动模式（手动触发）：
+#    - beta：行为同自动模式
+#    - release：创建正式发布，推送 latest 标签
+#
+# 3. PR 模式：
+#    - 仅执行代码检查和构建测试
+#    - 不创建标签和发布
+#    - 不推送 Docker 镜像
+#
+# 项目要求：
+# 1. Go 项目结构：
+#    - 必须有 main.go 作为入口文件
+#    - 必须在 main 包中定义 Version 变量
+#    - 建议使用 Go modules (go.mod)
+#
+# 2. Docker 要求：
+#    - 必须在根目录提供 Dockerfile
+#    - Dockerfile 必须支持多平台构建
+#    - 建议使用多阶段构建优化镜像大小
+#
+# 3. 权限要求：
+#    - GitHub Token 权限（自动配置）
+#    - Docker Hub 密钥配置
+#    
+# 4. 参考的 Dockerfile 示例：
+# ```dockerfile
+# FROM golang:1.22 AS builder
+# WORKDIR /app
+# COPY . .
+# RUN go mod download
+# RUN CGO_ENABLED=0 go build -o hubp
+#
+# FROM alpine:latest
+# WORKDIR /app
+# COPY --from=builder /app/hubp .
+# ENTRYPOINT ["/app/hubp"]
+# ```
+
+name: 自动构建与发布流程
 
 # 触发条件配置
 on:
+  # 推送到 main 分支时自动触发
   push:
     branches: [ main ]
+    paths-ignore:  # 忽略以下文件的变更
+      - '*.md'                    # 忽略所有 markdown 文件
+      - 'docs/**'                 # 忽略文档目录
+      - '.github/*.md'            # 忽略 GitHub 相关文档
+      - 'LICENSE'                 # 忽略许可证文件
+      - '.gitignore'              # 忽略 Git 忽略文件
+      - '.editorconfig'           # 忽略编辑器配置
+  
+  # PR 到 main 分支时触发检查
   pull_request:
     branches: [ main ]
+    paths-ignore:  # 同上忽略配置
+      - '*.md'
+      - 'docs/**'
+      - '.github/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+  
+  # 支持手动触发
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: '发布类型 (beta=预发布, release=正式发布)'
+        required: true
+        default: 'beta'
+        type: choice
+        options:
+          - beta     # 预发布版本
+          - release  # 正式发布版本
 
+# 环境权限配置
 permissions:
-  contents: write
+  contents: write  # 允许创建发布和标签
+  packages: write  # 允许推送到 GitHub Packages
+
+# 全局环境变量
+env:
+  # 构建配置
+  GO_VERSION: '1.22.0'           # Go 版本
+  BINARY_NAME: 'HubP'            # 二进制文件名
+  DOCKER_IMAGE: 'hubp'           # Docker 镜像名
+  PLATFORMS: linux/amd64,linux/arm64  # Docker 支持的平台
+  
+  # 缓存配置
+  GOCACHE: /tmp/go-cache        # Go 构建缓存目录
+  GOMODCACHE: /tmp/go-mod-cache # Go 模块缓存目录
+  
+  # 构建优化
+  CGO_ENABLED: 0                # 禁用 CGO，使用纯 Go 实现
+  GOOS: ''                      # 在具体任务中设置
+  GOARCH: ''                    # 在具体任务中设置
 
 jobs:
+  # 版本控制任务
   version:
     runs-on: ubuntu-latest
     outputs:
-      new_version: ${{ steps.bump_version.outputs.new_version }}
+      new_version: ${{ steps.bump_version.outputs.new_version }}            # 新版本号
+      is_manual_release: ${{ github.event_name == 'workflow_dispatch' }}    # 是否手动触发
+      is_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'release' }}  # 是否正式发布
     steps:
-      - name: 检出代码
+      - name: 检出代码 📥
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # 获取完整历史用于版本计算
           
-      - name: 获取最新版本
+      - name: 获取最新版本 🏷️
         id: get_latest
         run: |
+          # 获取最新标签，如果不存在则使用 v0.0.0
           latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
           echo "latest_tag=${latest_tag}" >> $GITHUB_OUTPUT
+          echo "当前版本: ${latest_tag}"
           
-      - name: 生成新版本号
+      - name: 生成新版本号 📝
         id: bump_version
         shell: bash
         run: |
           latest_tag="${{ steps.get_latest.outputs.latest_tag }}"
-          version="${latest_tag#v}"
+          version="${latest_tag#v}"  # 移除 v 前缀
+          
+          # 解析版本号组件
           major=$(echo "$version" | cut -d. -f1)
           minor=$(echo "$version" | cut -d. -f2)
           patch=$(echo "$version" | cut -d. -f3)
+          
+          # 增加修订号
           patch=$((patch + 1))
           new_version="v${major}.${minor}.${patch}"
-          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
-          echo "生成新版本: ${new_version}"
           
-      - name: 创建新标签
+          echo "new_version=${new_version}" >> $GITHUB_OUTPUT
+          echo "新版本: ${new_version}"
+          
+      - name: 创建新标签 📌
+        if: github.event_name != 'pull_request'  # PR 时不创建标签
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          echo "正在创建标签: ${{ steps.bump_version.outputs.new_version }}"
-          git tag ${{ steps.bump_version.outputs.new_version }}
+          echo "创建标签: ${{ steps.bump_version.outputs.new_version }}"
+          git tag -a ${{ steps.bump_version.outputs.new_version }} -m "Release ${{ steps.bump_version.outputs.new_version }}"
           git push origin ${{ steps.bump_version.outputs.new_version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build:
-    needs: version
+  # 代码质量检查
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, darwin, windows, freebsd]
-        arch: [amd64, arm64]
     steps:
-      - name: 检出代码
+      - name: 检出代码 📥
         uses: actions/checkout@v4
 
-      - name: 创建必要文件
-        run: |
-          if [ ! -f "go.mod" ]; then
-            go mod init HubP
-          fi
-          touch go.sum
-
-      - name: 设置 Go 环境
+      - name: 设置 Go 环境 🔧
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.0'
+          go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - name: 整理依赖
+      - name: 代码检查 🔍
         run: |
+          # 基本代码检查
+          if [ -f go.mod ]; then
+            echo "执行 go fmt..."
+            go fmt ./...
+            echo "执行 go vet..."
+            go vet ./...
+          else
+            echo "警告：未找到 go.mod 文件"
+            exit 1
+          fi
+          
+          # 检查必要文件
+          if [ ! -f "main.go" ]; then
+            echo "错误：未找到 main.go 文件"
+            exit 1
+          fi
+          
+          if [ ! -f "Dockerfile" ]; then
+            echo "错误：未找到 Dockerfile"
+            exit 1
+          fi
+
+  # 多平台构建任务
+  build:
+    needs: [version, lint]  # 依赖版本和代码检查任务
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false  # 某个平台失败不影响其他平台
+      matrix:
+        # 目标平台配置：os（操作系统）和 arch（架构）
+        os: [linux, darwin, windows, freebsd]
+        arch: [amd64, arm64]
+        # 排除不支持的组合（如果有的话）
+        # exclude:
+        #   - os: freebsd
+        #     arch: arm64  # 如果不支持这个组合，取消注释
+    steps:
+      - name: 检出代码 📥
+        uses: actions/checkout@v4
+
+      - name: 初始化 Go 环境 🔧
+        run: |
+          # 创建必要的构建文件
+          if [ ! -f "go.mod" ]; then
+            go mod init ${{ env.BINARY_NAME }}
+          fi
+          if [ ! -f "go.sum" ]; then
+            touch go.sum
+          fi
+          
+          # 创建缓存目录
+          mkdir -p ${{ env.GOCACHE }}
+          mkdir -p ${{ env.GOMODCACHE }}
+
+      - name: 设置 Go 环境 🛠️
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: 准备依赖 📦
+        run: |
+          echo "整理 Go 模块..."
           go mod tidy
+          echo "下载依赖..."
           go mod download
           
-      - name: 构建程序
+      - name: 构建程序 🏗️
         run: |
           VERSION=${{ needs.version.outputs.new_version }}
           mkdir -p release
-          binary_name="HubP"
+          binary_name="${{ env.BINARY_NAME }}"
+          
+          # Windows 平台特殊处理
           if [ "${{ matrix.os }}" = "windows" ]; then
             binary_name="${binary_name}.exe"
           fi
-          temp_dir="release/HubP-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
-          mkdir -p "${temp_dir}"
-          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -trimpath \
-            -ldflags="-s -w -X main.Version=${VERSION}" \
-            -o "${temp_dir}/HubP" .
-          if [ "${{ matrix.os }}" = "windows" ]; then
-            mv "${temp_dir}/HubP" "${temp_dir}/HubP.exe"
-          fi
-          echo "编译完成，二进制文件已生成于: ${temp_dir}"
-          cd release
-          zip_name="HubP-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip"
-          zip -9 "${zip_name}" -r "$(basename ${temp_dir})"/*
-          cd ..
-          sha256sum "release/${zip_name}" | tee -a "release/checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
           
-      - name: 上传构建产物
+          # 构建目录
+          temp_dir="release/${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "${temp_dir}"
+          
+          echo "开始构建 ${{ matrix.os }}/${{ matrix.arch }}..."
+          
+          # 执行构建，添加版本信息
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
+          go build -trimpath \
+            -ldflags="-s -w -X main.Version=${VERSION}" \
+            -o "${temp_dir}/${binary_name}" .
+          
+          # 打包和校验
+          cd release
+          echo "创建压缩包..."
+          zip -9 "${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip" \
+            -r "$(basename ${temp_dir})"/*
+          
+          echo "生成校验和..."
+          sha256sum "${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip" \
+            | tee -a "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
+          
+      - name: 上传构建产物 📤
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: release/*
           retention-days: 1
 
-  pre_release:
-    if: github.event_name != 'pull_request'
-    needs: [version, build]
+  # Docker 构建任务
+  docker:
+    needs: [version, lint]  # 依赖版本和代码检查任务
+    if: github.event_name != 'pull_request'  # PR 时不构建 Docker
     runs-on: ubuntu-latest
     steps:
-      - name: 下载构建产物
+      - name: 检出代码 📥
+        uses: actions/checkout@v4
+
+      - name: 设置 QEMU 🐳
+        uses: docker/setup-qemu-action@v3
+        
+      - name: 设置 Docker Buildx 🛠️
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录到 Docker Hub 🔑
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Beta 版本构建（自动运行或手动选择 beta）
+      - name: 构建 Beta 版本 🚧
+        if: needs.version.outputs.is_release != 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:beta
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 构建参数
+          build-args: |
+            VERSION=${{ needs.version.outputs.new_version }}
+            GO_VERSION=${{ env.GO_VERSION }}
+
+      # 正式版本构建（仅在手动选择 release 时）
+      - name: 构建正式版本 🚀
+        if: needs.version.outputs.is_release == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.new_version }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 构建参数
+          build-args: |
+            VERSION=${{ needs.version.outputs.new_version }}
+            GO_VERSION=${{ env.GO_VERSION }}
+
+  # 创建发布
+  release:
+    needs: [version, build, docker]
+    if: github.event_name != 'pull_request'  # PR 时不创建发布
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载构建产物 📥
         uses: actions/download-artifact@v4
         with:
           path: release
           pattern: release-*
           merge-multiple: true
           
-      - name: 合并校验和
+      - name: 准备发布文件 📋
         run: |
           mkdir -p final_release
+          # 复制所有 zip 文件
           find release -name "*.zip" -exec cp {} final_release/ \;
-          echo "## SHA256 校验" > final_release/checksums.txt
+          # 合并所有校验和
+          echo "## SHA256 校验和" > final_release/checksums.txt
           find release -name "checksums-*.txt" -exec cat {} >> final_release/checksums.txt \;
           
-      - name: 生成预发布说明
-        run: |
+          # 生成发布说明
           {
-            echo "# 自动构建预发布"
+            if [ "${{ needs.version.outputs.is_release }}" = "true" ]; then
+              echo "# 🚀 正式发布 ${{ needs.version.outputs.new_version }}"
+              echo ""
+            else
+              echo "# 🚧 预发布 ${{ needs.version.outputs.new_version }}"
+              echo ""
+            fi
             echo ""
-            echo "## 支持平台"
+            echo "## 📦 支持的平台"
             echo "- Linux (AMD64, ARM64)"
             echo "- macOS (AMD64, ARM64)"
             echo "- Windows (AMD64, ARM64)"
             echo "- FreeBSD (AMD64, ARM64)"
             echo ""
+            echo "## 🐳 Docker 镜像"
+            echo "支持的架构：AMD64, ARM64"
+            echo ""
+            echo "### 获取方式"
+            echo "\`\`\`bash"
+            if [ "${{ needs.version.outputs.is_release }}" = "true" ]; then
+              echo "# 使用最新稳定版"
+              echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest"
+              echo ""
+              echo "# 使用特定版本"
+              echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.new_version }}"
+            else
+              echo "# 使用最新测试版"
+              echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:beta"
+              echo ""
+              echo "# 使用特定版本"
+              echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.new_version }}"
+            fi
+            echo "\`\`\`"
+            echo ""
+            echo "## 🔍 校验和"
             cat final_release/checksums.txt
           } > final_release/release_notes.md
           
-      - name: 创建预发布
+      - name: 创建发布 📢
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.new_version }}
           files: |
             final_release/*.zip
+            final_release/checksums.txt
           body_path: final_release/release_notes.md
           draft: false
-          prerelease: true
+          # 自动运行或手动选择 beta 时创建预发布，手动选择 release 时创建正式发布
+          prerelease: ${{ needs.version.outputs.is_release != 'true' }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  docker_build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 登录到 Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: 构建 Docker 镜像
-        run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/hubp:latest .
-
-      - name: 推送 Docker 镜像
-        run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/hubp:latest

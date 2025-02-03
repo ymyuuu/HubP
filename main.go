@@ -9,10 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
+	"HubP/proxy"
 	"github.com/sirupsen/logrus"
-	"HubP/proxy" // 导入自定义代理模块，模块名称与 go.mod 保持一致
 )
 
 // Version 用于嵌入构建版本号，由 ldflags 设置；默认值为 "dev"
@@ -77,6 +78,7 @@ Demo:
 }
 
 func main() {
+
 	// 预处理命令行参数，将长参数转换为短参数
 	preprocessArgs()
 
@@ -84,10 +86,10 @@ func main() {
 	flag.Usage = usage
 
 	// 定义默认值
-	defaultListenAddress := "0.0.0.0"
-	defaultPort := 18826
-	defaultLogLevel := "info"
-	defaultDisguiseURL := "onlinealarmkur.com"
+	defaultListenAddress := getEnv("HUBP_LISTEN", "0.0.0.0")
+	defaultPort := getEnvAsInt("HUBP_PORT", 18826)
+	defaultLogLevel := getEnv("HUBP_LOG_LEVEL", "info")
+	defaultDisguiseURL := getEnv("HUBP_DISGUISE", "onlinealarmkur.com")
 
 	// 定义命令行参数变量
 	var flagListen string
@@ -187,9 +189,10 @@ func main() {
 // handleDisguise 处理伪装页面的反向代理
 // 将请求转发到配置中指定的伪装网站（默认 www.bing.com）
 // 参数说明：
-//   w         : HTTP 响应写入器
-//   r         : 原始 HTTP 请求
-//   bodyBytes : 请求体数据
+//
+//	w         : HTTP 响应写入器
+//	r         : 原始 HTTP 请求
+//	bodyBytes : 请求体数据
 func handleDisguise(w http.ResponseWriter, r *http.Request, bodyBytes []byte) {
 	// 构造目标 URL，使用配置中的伪装网站地址
 	targetURL := &url.URL{
@@ -258,4 +261,21 @@ func copyHeaders(dst, src http.Header) {
 			dst.Add(key, value)
 		}
 	}
+}
+
+// getEnv 获取环境变量的值，如果不存在则返回默认值
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
+}
+
+// getEnvAsInt 获取环境变量的值并转换为整数，如果不存在则返回默认值
+func getEnvAsInt(key string, defaultValue int) int {
+	valueStr := getEnv(key, "")
+	if value, err := strconv.Atoi(valueStr); err == nil {
+		return value
+	}
+	return defaultValue
 }

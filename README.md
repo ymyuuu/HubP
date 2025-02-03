@@ -61,7 +61,7 @@ HubP 支持命令行参数和环境变量两种配置方式:
 示例:
 
 ```bash
-./HubP -l 0.0.0.0 -p 18826 -ll debug -w example.com
+./HubP -l 0.0.0.0 -p 18826 -ll debug -w onlinealarmkur.com
 ```
 
 ### 环境变量 (Docker)

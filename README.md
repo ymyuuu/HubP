@@ -109,7 +109,7 @@ HubP 支持通过命令行参数进行配置，支持长短参数别名。具体
 从 Docker Hub 拉取最新的 HubP 镜像：
 
 ```bash
-docker pull <your-dockerhub-username>/hubp:latest
+docker pull ymyuuu/hubp:latest
 ```
 
 ### 运行 Docker 容器
@@ -117,7 +117,7 @@ docker pull <your-dockerhub-username>/hubp:latest
 使用拉取的 Docker 镜像运行 HubP 容器：
 
 ```bash
-docker run -d --name hubp -p 18826:18826 <your-dockerhub-username>/hubp:latest
+docker run -d --name hubp -p 18826:18826 ymyuuu/hubp:latest
 ```
 
 ### 配置环境变量
@@ -130,7 +130,7 @@ docker run -d --name hubp -p 18826:18826 \
   -e HUBP_PORT=18826 \
   -e HUBP_LOG_LEVEL=info \
   -e HUBP_DISGUISE=onlinealarmkur.com \
-  <your-dockerhub-username>/hubp:latest
+  ymyuuu/hubp:latest
 ```
 
 ## 许可证

@@ -395,7 +395,6 @@ jobs:
             fi
             echo "\`\`\`"
             echo ""
-            echo "## 🔍 校验和"
             cat final_release/checksums.txt
           } > final_release/release_notes.md
           

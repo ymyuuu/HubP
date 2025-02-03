@@ -161,6 +161,7 @@ jobs:
 
   docker_build:
     runs-on: ubuntu-latest
+    needs: version
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -173,8 +174,11 @@ jobs:
 
       - name: 构建 Docker 镜像
         run: |
-          docker build -t ${{ secrets.DOCKER_USERNAME }}/hubp:latest .
+          VERSION=${{ needs.version.outputs.new_version }}
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/hubp:latest -t ${{ secrets.DOCKER_USERNAME }}/hubp:${VERSION} .
 
       - name: 推送 Docker 镜像
         run: |
+          VERSION=${{ needs.version.outputs.new_version }}
           docker push ${{ secrets.DOCKER_USERNAME }}/hubp:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/hubp:${VERSION}

@@ -100,6 +100,39 @@ HubP 支持通过命令行参数进行配置，支持长短参数别名。具体
 
 编译成功后，将生成对应平台的可执行文件，供部署使用
 
+## 使用 Docker 镜像
+
+你可以使用 Docker 镜像来运行 HubP，无需自行编译和配置环境。以下是使用 Docker 镜像的步骤：
+
+### 拉取 Docker 镜像
+
+从 Docker Hub 拉取最新的 HubP 镜像：
+
+```bash
+docker pull <your-dockerhub-username>/hubp:latest
+```
+
+### 运行 Docker 容器
+
+使用拉取的 Docker 镜像运行 HubP 容器：
+
+```bash
+docker run -d --name hubp -p 18826:18826 <your-dockerhub-username>/hubp:latest
+```
+
+### 配置环境变量
+
+你可以通过设置环境变量来配置 HubP 容器。例如，设置监听地址和端口：
+
+```bash
+docker run -d --name hubp -p 18826:18826 \
+  -e HUBP_LISTEN=0.0.0.0 \
+  -e HUBP_PORT=18826 \
+  -e HUBP_LOG_LEVEL=info \
+  -e HUBP_DISGUISE=onlinealarmkur.com \
+  <your-dockerhub-username>/hubp:latest
+```
+
 ## 许可证
 
 本项目采用 Apache 许可证，详细内容请参见 [LICENSE](LICENSE) 文件

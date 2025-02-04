@@ -1,51 +1,63 @@
+################################################################################
+# 工作流名称：自动构建与发布流程
+# 文件路径：.github/workflows/build.yml
+#
+# 功能说明：
+# 1. push 或 pull_request 到 main 分支：
+#    - 只执行代码质量检查（lint）和多平台构建（build）任务
+#    - 不推送 Docker 镜像、不创建标签、不创建 Release
+#
+# 2. 手动触发 (workflow_dispatch)：
+#    - 可以通过选择 release_type 参数（Beta 或 Releases）
+#      * release_type=Beta：预发布；Docker 镜像推送至 beta 标签
+#      * release_type=Releases：正式发布；Docker 镜像推送至 latest 标签
+#    - 自动根据最新的 Git Tag 版本号 +1，创建并推送新标签
+#    - 根据选择创建对应的 GitHub Release（预发布或正式发布）
+#    - 推送 Docker 多架构镜像至 Docker Hub
+#
+# 3. Go 项目 & Docker 约束：
+#    - main.go 作为入口文件，且在 main 包中定义 Version 变量
+#    - Dockerfile 必须支持多平台构建（使用 buildx + QEMU）
+#    - 如需优化镜像大小，可使用多阶段构建
+#
+# 4. 可能出现的问题：
+#    - 若没有 go.mod 文件，将自动执行 go mod init；可能需要根据实际项目包名进行微调
+#    - freebsd 在 arm64 下有可能构建失败（需视实际情况排除该组合）
+#    - Windows 平台的可执行文件需添加 .exe 后缀
+#
+# 5. 提高可读性与用户体验：
+#    - 使用了部分 emoji 图标，让输出和步骤名称更加直观
+#    - 对关键步骤进行了中文注释说明，方便维护
+################################################################################
+
 name: 自动构建与发布流程
 
 ################################################################################
-# 触发条件：                                                                     
-#   1. push 到 main 分支：只执行代码质量检查和多平台构建（不推送 Docker、不创建标签和发布）
-#   2. pull_request 到 main 分支：只执行代码质量检查和多平台构建（不推送 Docker、不创建标签和发布）
-#   3. 手动触发（workflow_dispatch），通过输入参数决定发布类型：                         
-#      - beta：创建预发布并推送 beta 标签                                    
-#      - release：创建正式发布并推送 latest 标签                              
+# 触发条件配置
 ################################################################################
-
 on:
-  # 当有代码 push 到 main 分支时触发
+  # 当 push 到 main 分支时：执行 lint + build，仅做测试和检查
   push:
     branches: [ main ]
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - '.github/*.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
 
-  # 当有 PR（Pull Request）合并到 main 分支时触发
+  # 当有 PR (pull_request) 合并到 main 时：执行 lint + build，仅做测试和检查
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - '.github/*.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - '.editorconfig'
 
-  # 手动触发
+  # 手动触发 (workflow_dispatch)
   workflow_dispatch:
     inputs:
       release_type:
-        description: '发布类型 (beta=预发布, release=正式发布)'
+        description: '选择发布类型 (Beta=预发布, Releases=正式发布)'
         required: true
-        default: 'beta'
+        default: 'Beta'
         type: choice
         options:
-          - beta
-          - release
+          - Beta
+          - Releases
 
 ################################################################################
-# 工作流权限配置：允许创建标签/发布，推送到 Packages 等
+# 权限配置：允许创建标签、发布和推送到 Packages
 ################################################################################
 permissions:
   contents: write
@@ -53,82 +65,76 @@ permissions:
 
 ################################################################################
 # 全局环境变量
+# - 可在不同 Job 中重复使用
+# - Docker 多平台构建需要在 docker/build-push-action 中引用
 ################################################################################
 env:
-  # Go 基础版本
-  GO_VERSION: '1.22.0'
-  
-  # 二进制文件名称
-  BINARY_NAME: 'HubP'
-
-  # Docker 镜像名称（构建时使用）
-  DOCKER_IMAGE: 'hubp'
-  
-  # Docker 支持的平台（多架构）
-  PLATFORMS: linux/amd64,linux/arm64
+  GO_VERSION: "1.22.0"          # Go 版本
+  BINARY_NAME: "HubP"           # 二进制文件名
+  DOCKER_IMAGE: "hubp"          # Docker 镜像名
+  PLATFORMS: "linux/amd64,linux/arm64"  # Docker 多平台构建目标
 
 ################################################################################
-# Job 1: 版本处理（根据是否手动触发，决定是否自动生成新版本并创建标签）
+# Job 1: 版本处理 —— 根据是否手动触发决定版本号与标签创建
 ################################################################################
 jobs:
   version:
-    name: 版本处理
+    name: 版本处理 🏷️
     runs-on: ubuntu-latest
 
     outputs:
-      # 对外输出：最终用于构建时所需的版本号
-      final_version: ${{ steps.set_version.outputs.final_version }}
-      # 对外输出：是否为手动触发
+      final_version: ${{ steps.version_step.outputs.final_version }}  # 下游需要的版本号
+      # 是否手动触发（workflow_dispatch）
       is_manual: ${{ github.event_name == 'workflow_dispatch' }}
-      # 对外输出：是否为正式发布（仅手动触发 + release_type=release）
-      is_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'release' }}
+      # 是否正式发布（仅当手动触发 && release_type=Releases 才为 true）
+      is_release: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_type == 'Releases' }}
 
     steps:
       - name: 检出代码 📥
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 获取完整提交历史，便于后续可能的版本计算
+          fetch-depth: 0  # 获取完整提交历史，以便获取最新标签
 
-      - name: 设置临时或真实版本号
-        id: set_version
+      - name: 设置版本号
+        id: version_step
         shell: bash
         run: |
-          # 如果不是手动触发（即 push 或 PR），我们只使用一个临时版本号，不创建标签
+          ############################################################################
+          # 如果不是手动触发 (push / pull_request)，则直接使用临时版本号，不创建真实标签
+          ############################################################################
           if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
-            echo "当前触发并非手动模式，使用临时版本号 v0.0.0-snapshot"
+            echo "当前为 push 或 PR 触发，仅使用临时版本号 v0.0.0-snapshot"
             echo "final_version=v0.0.0-snapshot" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          #-------------------------
-          # 以下逻辑仅在手动触发时执行
-          #-------------------------
-          # 1. 取得最新标签（如果没有则默认为 v0.0.0）
+          ############################################################################
+          # 如果是手动触发，则需要:
+          # 1. 获取最新标签
+          # 2. 将补丁号 +1
+          # 3. 生成新的版本号并输出
+          ############################################################################
           latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "获取到的最新标签: ${latest_tag}"
+          echo "获取到的最新标签: $latest_tag"
 
-          # 2. 移除 v 前缀并进行分割，拆出 major.minor.patch
-          version="${latest_tag#v}"
-          major=$(echo "$version" | cut -d. -f1)
-          minor=$(echo "$version" | cut -d. -f2)
-          patch=$(echo "$version" | cut -d. -f3)
+          version_no_v="${latest_tag#v}"    # 去掉前缀 v
+          major=$(echo "$version_no_v" | cut -d. -f1)
+          minor=$(echo "$version_no_v" | cut -d. -f2)
+          patch=$(echo "$version_no_v" | cut -d. -f3)
 
-          # 3. patch 号 +1
           patch=$((patch + 1))
           new_version="v${major}.${minor}.${patch}"
 
-          # 将生成的新版本号输出
-          echo "生成的新版本号: $new_version"
+          echo "生成新版本号: $new_version"
           echo "final_version=$new_version" >> $GITHUB_OUTPUT
 
-      - name: 创建并推送新标签（仅手动触发时）
+      - name: 创建并推送新标签
         if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          # 从上一步获取新版本号
-          version="${{ steps.set_version.outputs.final_version }}"
-          echo "准备推送标签: ${version}"
-
-          # 配置 git
+          # 仅在手动触发时才执行此步骤
+          version="${{ steps.version_step.outputs.final_version }}"
+          echo "即将创建并推送标签: ${version}"
+          
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
@@ -138,67 +144,73 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 ################################################################################
-# Job 2: 代码质量检查（lint）
+# Job 2: 代码质量检查 (lint)
 ################################################################################
   lint:
-    name: 代码质量检查
+    name: 代码质量检查 🔍
     runs-on: ubuntu-latest
+
     steps:
       - name: 检出代码 📥
         uses: actions/checkout@v4
 
-      - name: 安装指定版本 Go 环境 🔧
+      - name: 设置 Go 环境 🔧
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           # 不使用缓存
           cache: false
 
-      - name: 代码格式与静态检查 🔍
+      - name: 执行代码格式化 & 静态检查
         run: |
-          # 检测 go.mod 是否存在
-          if [ ! -f "go.mod" ]; then
-            echo "错误：未找到 go.mod 文件，无法进行 Go 项目的依赖管理。"
+          # 检查 go.mod
+          if [ ! -f go.mod ]; then
+            echo "错误：项目根目录下未找到 go.mod 文件，无法进行依赖管理。"
             exit 1
           fi
 
-          # 进行 go fmt
-          echo "开始执行 go fmt..."
+          # go fmt
+          echo "🔹 开始执行 go fmt..."
           go fmt ./...
-          echo "go fmt 执行完毕。"
+          echo "✅ go fmt 完成。"
 
-          # 进行 go vet
-          echo "开始执行 go vet..."
+          # go vet
+          echo "🔹 开始执行 go vet..."
           go vet ./...
-          echo "go vet 执行完毕。"
+          echo "✅ go vet 完成。"
 
-          # 检查 main.go 文件是否存在
+          # 核验 main.go
           if [ ! -f "main.go" ]; then
-            echo "错误：未找到 main.go 入口文件。"
+            echo "错误：未找到 main.go 入口文件！"
             exit 1
           fi
 
-          # 检查 Dockerfile 文件是否存在
+          # 核验 Dockerfile
           if [ ! -f "Dockerfile" ]; then
-            echo "错误：未找到 Dockerfile 文件。"
+            echo "错误：未找到 Dockerfile 文件！"
             exit 1
           fi
 
 ################################################################################
-# Job 3: 多平台构建（只负责产物构建与打包，不推送 Docker）
+# Job 3: 多平台构建 (build)
+#  - 仅进行编译与产物打包，用于测试各平台能否成功构建
+#  - push 或 PR 时：会触发这一过程，但不推送 Docker
 ################################################################################
   build:
-    name: 多平台构建
-    needs: [version, lint]  # 依赖版本处理和代码质量检查
+    name: 多平台构建 🏗️
+    needs: [version, lint]  # 必须先完成版本处理和代码质量检查
 
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, darwin, windows, freebsd]
-        arch: [amd64, arm64]
-        # 如需排除特定组合，可在此使用 exclude
+        os: [ linux, darwin, windows, freebsd ]
+        arch: [ amd64, arm64 ]
+        # 如需排除某些不兼容组合，可在此添加 exclude
+        # exclude:
+        #   - os: freebsd
+        #     arch: arm64
 
     steps:
       - name: 检出代码 📥
@@ -213,63 +225,53 @@ jobs:
 
       - name: 准备 Go 模块依赖
         run: |
-          # 如果没有 go.mod，则初始化
-          if [ ! -f "go.mod" ]; then
+          if [ ! -f go.mod ]; then
             go mod init ${{ env.BINARY_NAME }}
           fi
-          # 如果没有 go.sum，则创建
-          if [ ! -f "go.sum" ]; then
+          if [ ! -f go.sum ]; then
             touch go.sum
           fi
-
-          echo "下载依赖..."
+          
+          echo "正在下载依赖..."
           go mod tidy
           go mod download
 
-      - name: 构建与打包
+      - name: 构建与打包 📦
         run: |
-          # 从 version Job 获取我们需要使用的版本号
+          # 取得版本号（push 或 PR 时为 v0.0.0-snapshot；手动触发则为实际版本）
           VERSION=${{ needs.version.outputs.final_version }}
-          echo "使用版本号：${VERSION}"
+          echo "当前使用版本号：$VERSION"
 
-          # 统一放在 release 目录
           mkdir -p release
 
-          # 构建出的最终二进制名称（区分 Windows 后缀）
+          # 构建输出目录名称
+          temp_dir="release/${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
+          mkdir -p "${temp_dir}"
+
+          # 根据系统类型决定文件名后缀（Windows 需 .exe）
           binary_name="${{ env.BINARY_NAME }}"
           if [ "${{ matrix.os }}" = "windows" ]; then
             binary_name="${binary_name}.exe"
           fi
 
-          # 构建输出的临时目录：例如 release/HubP-v1.0.1-linux-amd64
-          temp_dir="release/${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}"
-          mkdir -p "${temp_dir}"
-
-          echo "开始构建 -> OS: ${{ matrix.os }}, ARCH: ${{ matrix.arch }}"
-
-          # 设置目标平台并进行构建（注入版本变量 main.Version）
+          echo "开始编译 -> OS: ${{ matrix.os }} / ARCH: ${{ matrix.arch }}"
           GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
-            go build \
+          go build \
             -trimpath \
             -ldflags="-s -w -X main.Version=${VERSION}" \
             -o "${temp_dir}/${binary_name}" \
             .
 
-          echo "构建完成。开始打包..."
+          echo "编译完成，开始打包压缩..."
 
-          # 进入 release 目录进行后续操作
           cd release
-
-          # 压缩包名称，例如：HubP-v1.0.1-linux-amd64.zip
           zip_file="${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip"
-
-          # 创建 zip 压缩包
           zip -9 "${zip_file}" -r "$(basename ${temp_dir})"
 
-          # 生成校验和
+          echo "生成校验和..."
           sha256sum "${zip_file}" | tee -a "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"
 
-      - name: 上传构建产物
+      - name: 上传构建产物 📤
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.os }}-${{ matrix.arch }}
@@ -277,12 +279,14 @@ jobs:
           retention-days: 1
 
 ################################################################################
-# Job 4: Docker 构建与推送（仅在手动触发时进行推送）
+# Job 4: Docker 构建与推送（🐳）
+#  - 仅在手动触发 (workflow_dispatch) 时进行
+#  - 根据 release_type=Beta 或 release_type=Releases 推送对应 Docker 标签（beta/latest）
 ################################################################################
   docker:
-    name: Docker 构建与推送
-    needs: [version, lint]  # 不需要依赖 build Job，因为 build Job 仅做二进制产物测试
-    if: ${{ github.event_name == 'workflow_dispatch' }}  # 只有手动触发才进行 Docker 构建推送
+    name: Docker 构建与推送 🐳
+    needs: [version, lint]
+    if: ${{ github.event_name == 'workflow_dispatch' }}  # 仅手动触发时才执行
 
     runs-on: ubuntu-latest
 
@@ -290,26 +294,26 @@ jobs:
       - name: 检出代码 📥
         uses: actions/checkout@v4
 
-      - name: 设置 QEMU（多架构支持）
+      - name: 设置 QEMU (多架构支持)
         uses: docker/setup-qemu-action@v3
 
       - name: 设置 Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Docker Hub 登录
+      - name: 登录 Docker Hub 🔑
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: 构建并推送 Docker 镜像（beta 或预发布）
+      - name: 构建并推送镜像 (预发布 / Beta)
         if: ${{ needs.version.outputs.is_release != 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
-          # 无缓存
+          # 不使用构建缓存
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.final_version }}
             ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:beta
@@ -317,14 +321,14 @@ jobs:
             VERSION=${{ needs.version.outputs.final_version }}
             GO_VERSION=${{ env.GO_VERSION }}
 
-      - name: 构建并推送 Docker 镜像（正式发布）
+      - name: 构建并推送镜像 (正式发布 / Releases)
         if: ${{ needs.version.outputs.is_release == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: ${{ env.PLATFORMS }}
           push: true
-          # 无缓存
+          # 不使用构建缓存
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.final_version }}
             ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest
@@ -333,70 +337,77 @@ jobs:
             GO_VERSION=${{ env.GO_VERSION }}
 
 ################################################################################
-# Job 5: 创建 GitHub Release（仅在手动触发时执行）
+# Job 5: 创建 GitHub Release
+#  - 仅在手动触发时执行
+#  - 自动收集并上传多平台构建产物
+#  - 根据 release_type=Beta/Releases 来决定发布类型（预发布或正式发布）
 ################################################################################
   release:
-    name: 创建发布
+    name: 创建发布 📢
     needs: [version, build, docker]
-    if: ${{ github.event_name == 'workflow_dispatch' }}  # 仅在手动触发时运行
+    if: ${{ github.event_name == 'workflow_dispatch' }}
 
     runs-on: ubuntu-latest
 
     steps:
-      - name: 下载构建产物
+      - name: 下载构建产物 📥
         uses: actions/download-artifact@v4
         with:
           path: release
           pattern: build-*
           merge-multiple: true
 
-      - name: 整理发布文件
+      - name: 整理发布文件 🗂
         run: |
           mkdir -p final_release
-          # 收集所有的 zip 包
+          # 收集所有 ZIP 包
           find release -name "*.zip" -exec cp {} final_release/ \;
 
-          # 合并所有的校验和文件
-          echo "## SHA256 校验和" > final_release/checksums.txt
+          # 收集并合并校验和
           find release -name "checksums-*.txt" -exec cat {} >> final_release/checksums.txt \;
 
-          # 准备发布说明
+          ############################################################################
+          # 生成发布说明
+          ############################################################################
           {
+            # 判断是正式发布(Releases)还是预发布(Beta)
             if [ "${{ needs.version.outputs.is_release }}" = "true" ]; then
               echo "# 🚀 正式发布 ${{ needs.version.outputs.final_version }}"
-              echo ""
             else
               echo "# 🚧 预发布 ${{ needs.version.outputs.final_version }}"
-              echo ""
             fi
-            echo "## 支持的平台"
+            echo ""
+
+            echo "## 📦 支持的平台"
             echo "- Linux (AMD64, ARM64)"
             echo "- macOS (AMD64, ARM64)"
             echo "- Windows (AMD64, ARM64)"
             echo "- FreeBSD (AMD64, ARM64)"
             echo ""
-            echo "## Docker 镜像"
-            echo "可用的多架构：AMD64, ARM64"
+
+            echo "## 🐳 Docker 镜像"
+            echo "支持多架构：AMD64, ARM64"
             echo ""
             if [ "${{ needs.version.outputs.is_release }}" = "true" ]; then
-              echo "### 拉取最新稳定版"
+              echo "### 如何拉取最新稳定版？"
               echo "\`\`\`bash"
               echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:latest"
               echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.final_version }}"
               echo "\`\`\`"
             else
-              echo "### 拉取测试版"
+              echo "### 如何拉取测试版？"
               echo "\`\`\`bash"
               echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:beta"
               echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ needs.version.outputs.final_version }}"
               echo "\`\`\`"
             fi
             echo ""
-            echo "## 校验和"
+
+            echo "## 🔑 SHA256 校验和"
             cat final_release/checksums.txt
           } > final_release/release_notes.md
 
-      - name: 创建 Release
+      - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.final_version }}
@@ -405,7 +416,7 @@ jobs:
             final_release/checksums.txt
           body_path: final_release/release_notes.md
           draft: false
-          # 如果是正式发布则不设为预发布，否则为预发布
+          # 若是预发布 (Beta) 则设置为 true，若是正式发布 (Releases) 则为 false
           prerelease: ${{ needs.version.outputs.is_release != 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

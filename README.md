@@ -67,7 +67,7 @@ HubP 支持命令行参数和环境变量两种配置方式:
 ### 环境变量 (Docker)
 
 ```bash
-sudo docker run -d --name hubp \
+sudo docker run -d --restart unless-stopped --name HubP \
   -p 18826:18826 \
   -e HUBP_LOG_LEVEL=debug \
   -e HUBP_DISGUISE=onlinealarmkur.com \

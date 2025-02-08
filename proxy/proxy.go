@@ -1,12 +1,10 @@
+// proxy.go
 package proxy
 
 import (
-	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,276 +12,270 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// targetHost 定义目标 Docker 主机地址，所有 /v2/ 请求将转发至此主机
-const targetHost = "registry-1.docker.io"
+// 常量定义
+const (
+	targetHost = "registry-1.docker.io" // Docker Hub 的目标主机地址
+)
 
-// 定义 HTTP 客户端，并禁用自动重定向处理，由代码手动处理重定向逻辑
+// 自定义 HTTP 客户端
 var client = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		// 返回此错误时，http.Client 不会自动重定向
 		return http.ErrUseLastResponse
 	},
 }
 
-// HandleProxy 处理 Docker 相关代理请求的入口函数
-// 参数说明：
-//   w         : HTTP 响应写入器
-//   r         : 原始 HTTP 请求
-//   bodyBytes : 请求体数据（适用于非 GET/HEAD 请求）
-func HandleProxy(w http.ResponseWriter, r *http.Request, bodyBytes []byte) {
-	// 构造目标 URL，保持原请求的路径和查询参数不变
+// HandleProxy 处理 Docker 相关代理请求
+func HandleProxy(w http.ResponseWriter, r *http.Request) {
+	// 构造目标 URL
 	targetURL := &url.URL{
 		Scheme:   "https",
 		Host:     targetHost,
 		Path:     r.URL.Path,
 		RawQuery: r.URL.RawQuery,
 	}
-	logrus.Debugf("Docker 代理请求: %s %s", r.Method, targetURL.String())
 
-	// 发起代理请求，并处理响应
-	if err := proxyRequest(w, r, targetURL.String(), bodyBytes); err != nil {
-		http.Error(w, "代理请求失败", http.StatusInternalServerError)
-		logrus.Errorf("代理请求失败: %v", err)
+	logrus.Debugf("[Docker] 收到请求: %s %s", r.Method, r.URL.Path)
+
+	// 发起代理请求
+	if err := proxyRequest(w, r, targetURL.String()); err != nil {
+		logrus.Errorf("[Docker] 代理请求失败: %v", err)
+		if !isResponseWritten(w) {
+			http.Error(w, "服务器错误", http.StatusInternalServerError)
+		}
 	}
 }
 
 // proxyRequest 发起代理请求并处理响应
-func proxyRequest(w http.ResponseWriter, r *http.Request, targetURL string, bodyBytes []byte) error {
-	var bodyReader io.Reader
-	// 如果请求方法不是 GET 或 HEAD，则传递请求体
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		bodyReader = bytes.NewReader(bodyBytes)
-	}
-	// 创建新的 HTTP 请求对象
-	newReq, err := http.NewRequest(r.Method, targetURL, bodyReader)
+func proxyRequest(w http.ResponseWriter, r *http.Request, targetURL string) error {
+	// 创建新的代理请求
+	newReq, err := http.NewRequest(r.Method, targetURL, r.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("创建请求失败: %v", err)
 	}
 
-	// 复制原请求的所有请求头到新请求中
-	copyHeaders(newReq.Header, r.Header)
-	// 设置 Host 头为目标主机
-	newReq.Header.Set("Host", targetHost)
-	// 删除 Accept-Encoding 头，防止服务端返回压缩数据
-	newReq.Header.Del("Accept-Encoding")
-
-	// 使用自定义 HTTP 客户端发起请求
-	resp, err := client.Do(newReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 如果返回 401 状态码，尝试获取 token 后重试请求
-	if resp.StatusCode == http.StatusUnauthorized {
-		logrus.Debug("收到 401 响应，尝试获取 token")
-		authHeader := resp.Header.Get("WWW-Authenticate")
-		authParams := parseAuth(authHeader)
-		if authParams["realm"] == "" || authParams["service"] == "" {
-			// 如果认证参数不全，则直接返回原响应
-			return writeResponse(w, resp)
-		}
-		// 尝试获取 token
-		token, err := fetchToken(authParams)
-		if err != nil || token == "" {
-			logrus.Errorf("获取 token 失败: %v", err)
-			return writeResponse(w, resp)
-		}
-		logrus.Debug("成功获取 token，重新发起请求")
-		return fetchWithToken(w, r, targetURL, bodyBytes, token)
-	}
-
-	// 如果响应为重定向状态码，则处理重定向
-	if isRedirect(resp.StatusCode) {
-		location := resp.Header.Get("Location")
-		if location != "" {
-			redirectURL, err := url.Parse(location)
-			if err != nil {
-				return err
-			}
-			baseURL, err := url.Parse(targetURL)
-			if err != nil {
-				return err
-			}
-			// 解析新的重定向 URL
-			newURL := baseURL.ResolveReference(redirectURL)
-			logrus.Debugf("处理重定向，新的 URL: %s", newURL.String())
-			return proxyRequest(w, r, newURL.String(), bodyBytes)
-		}
-	}
-
-	// 将目标服务器的响应写回给客户端
-	return writeResponse(w, resp)
-}
-
-// fetchWithToken 使用 Bearer token 重新发起请求
-func fetchWithToken(w http.ResponseWriter, r *http.Request, targetURL string, bodyBytes []byte, token string) error {
-	var bodyReader io.Reader
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		bodyReader = bytes.NewReader(bodyBytes)
-	}
-	newReq, err := http.NewRequest(r.Method, targetURL, bodyReader)
-	if err != nil {
-		return err
-	}
-
-	// 复制请求头，并添加 Authorization 头
+	// 复制请求头
 	copyHeaders(newReq.Header, r.Header)
 	newReq.Header.Set("Host", targetHost)
 	newReq.Header.Del("Accept-Encoding")
-	newReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 
+	logrus.Debugf("[Docker] 转发请求至: %s", targetURL)
+
+	// 发送请求
 	resp, err := client.Do(newReq)
 	if err != nil {
-		return err
+		return fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// 处理重定向情况
-	if isRedirect(resp.StatusCode) {
-		location := resp.Header.Get("Location")
-		if location != "" {
-			redirectURL, err := url.Parse(location)
-			if err != nil {
-				return err
-			}
-			baseURL, err := url.Parse(targetURL)
-			if err != nil {
-				return err
-			}
-			newURL := baseURL.ResolveReference(redirectURL)
-			logrus.Debugf("使用 token 处理重定向，新的 URL: %s", newURL.String())
-			return fetchWithToken(w, r, newURL.String(), bodyBytes, token)
-		}
-	}
-
-	// 如果仍返回 401，则放弃 token 处理，回到主逻辑重新代理请求
+	// 处理 401 认证错误
 	if resp.StatusCode == http.StatusUnauthorized {
-		logrus.Debug("使用 token 请求仍返回 401，回到主逻辑")
-		return proxyRequest(w, r, targetURL, bodyBytes)
+		logrus.Debug("[Docker] 需要认证，尝试获取 token")
+		return handleAuthAndRetry(w, r, targetURL, resp)
 	}
 
-	// 将响应写回客户端
+	// 处理重定向响应
+	if isRedirect(resp.StatusCode) {
+		logrus.Debug("[Docker] 处理重定向响应")
+		return handleRedirect(w, r, resp, targetURL)
+	}
+
+	// 写入常规响应
 	return writeResponse(w, resp)
 }
 
-// copyHeaders 复制请求头，将 src 中所有 header 复制到 dst 中
-func copyHeaders(dst, src http.Header) {
-	for key, values := range src {
-		for _, value := range values {
-			dst.Add(key, value)
-		}
+// handleAuthAndRetry 处理认证并重试请求
+func handleAuthAndRetry(w http.ResponseWriter, r *http.Request, targetURL string, resp *http.Response) error {
+	// 获取认证参数
+	authHeader := resp.Header.Get("WWW-Authenticate")
+	authParams := parseAuth(authHeader)
+
+	if authParams["realm"] == "" || authParams["service"] == "" {
+		logrus.Debug("[Docker] 认证参数不完整，返回原始响应")
+		return writeResponse(w, resp)
 	}
+
+	// 获取 token
+	token, err := fetchToken(authParams)
+	if err != nil {
+		logrus.Errorf("[Docker] 获取 token 失败: %v", err)
+		return writeResponse(w, resp)
+	}
+
+	logrus.Debug("[Docker] 获取 token 成功，重试请求")
+	return retryWithToken(w, r, targetURL, token)
 }
 
-// writeResponse 将目标服务器的响应写回给客户端
+// retryWithToken 使用 token 重试请求
+func retryWithToken(w http.ResponseWriter, r *http.Request, targetURL, token string) error {
+	// 创建新的认证请求
+	newReq, err := http.NewRequest(r.Method, targetURL, r.Body)
+	if err != nil {
+		return fmt.Errorf("创建认证请求失败: %v", err)
+	}
+
+	// 设置请求头
+	copyHeaders(newReq.Header, r.Header)
+	newReq.Header.Set("Host", targetHost)
+	newReq.Header.Set("Authorization", "Bearer "+token)
+	newReq.Header.Del("Accept-Encoding")
+
+	// 发送请求
+	resp, err := client.Do(newReq)
+	if err != nil {
+		return fmt.Errorf("发送认证请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// 处理重定向
+	if isRedirect(resp.StatusCode) {
+		return handleRedirect(w, r, resp, targetURL)
+	}
+
+	return writeResponse(w, resp)
+}
+
+// handleRedirect 处理重定向请求
+func handleRedirect(w http.ResponseWriter, r *http.Request, resp *http.Response, targetURL string) error {
+	location := resp.Header.Get("Location")
+	if location == "" {
+		logrus.Debug("[Docker] 重定向响应缺少 Location 头")
+		return writeResponse(w, resp)
+	}
+
+	// 解析重定向 URL
+	redirectURL, err := url.Parse(location)
+	if err != nil {
+		return fmt.Errorf("解析重定向 URL 失败: %v", err)
+	}
+
+	baseURL, err := url.Parse(targetURL)
+	if err != nil {
+		return fmt.Errorf("解析基础 URL 失败: %v", err)
+	}
+
+	// 获取新的完整 URL
+	newURL := baseURL.ResolveReference(redirectURL)
+	logrus.Debugf("[Docker] 重定向至: %s", newURL.String())
+	
+	return proxyRequest(w, r, newURL.String())
+}
+
+// writeResponse 将响应写回客户端
 func writeResponse(w http.ResponseWriter, resp *http.Response) error {
 	// 复制响应头
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	// 写入响应状态码
+	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	// 读取响应体
-	body, err := ioutil.ReadAll(resp.Body)
+
+	// 流式传输响应体
+	written, err := io.Copy(w, resp.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("写入响应体失败: %v", err)
 	}
-	// 写入响应体数据
-	_, err = w.Write(body)
-	return err
+
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.Debugf("[Docker] 响应完成 [状态码: %d] [大小: %.2f KB]", 
+			resp.StatusCode, float64(written)/1024)
+	}
+
+	return nil
 }
 
-// isRedirect 判断 HTTP 状态码是否为重定向状态码
-func isRedirect(statusCode int) bool {
-	return statusCode == http.StatusMovedPermanently ||
-		statusCode == http.StatusFound ||
-		statusCode == http.StatusSeeOther ||
-		statusCode == http.StatusTemporaryRedirect ||
-		statusCode == http.StatusPermanentRedirect
+// copyHeaders 复制 HTTP 头
+func copyHeaders(dst, src http.Header) {
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
 }
 
-// parseAuth 解析 WWW-Authenticate 头信息，提取认证参数
+// parseAuth 解析认证头
 func parseAuth(header string) map[string]string {
 	result := make(map[string]string)
-	// 去除 "Bearer " 前缀
 	header = strings.TrimPrefix(header, "Bearer ")
-	// 以逗号分隔参数
-	parts := strings.Split(header, ",")
-	for _, part := range parts {
+	
+	for _, part := range strings.Split(header, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		// 以等号分隔键值对
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) != 2 {
-			continue
+		
+		if kv := strings.SplitN(part, "=", 2); len(kv) == 2 {
+			key := strings.TrimSpace(kv[0])
+			value := strings.Trim(strings.TrimSpace(kv[1]), `"`)
+			result[key] = value
 		}
-		key := strings.TrimSpace(kv[0])
-		// 去除两边的引号
-		value := strings.Trim(strings.TrimSpace(kv[1]), `"`)
-		result[key] = value
 	}
+	
 	return result
 }
 
-// fetchToken 根据认证参数从认证服务器获取 token
+// fetchToken 从认证服务器获取 token
 func fetchToken(authParams map[string]string) (string, error) {
-	realm, ok := authParams["realm"]
-	if !ok || realm == "" {
-		return "", errors.New("缺少 realm 参数")
-	}
-	service, ok := authParams["service"]
-	if !ok || service == "" {
-		return "", errors.New("缺少 service 参数")
-	}
-	// 解析 realm URL
-	reqURL, err := url.Parse(realm)
+	// 构造认证 URL
+	reqURL, err := url.Parse(authParams["realm"])
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("解析认证 URL 失败: %v", err)
 	}
-	// 设置 query 参数：service 和可选的 scope
+
+	// 设置查询参数
 	query := reqURL.Query()
-	query.Set("service", service)
-	if scope, ok := authParams["scope"]; ok && scope != "" {
+	query.Set("service", authParams["service"])
+	if scope := authParams["scope"]; scope != "" {
 		query.Set("scope", scope)
 	}
 	reqURL.RawQuery = query.Encode()
 
-	logrus.Debugf("获取 token 的请求 URL: %s", reqURL.String())
-	// 发起 GET 请求获取 token
+	logrus.Debugf("[Docker] 请求 token: %s", reqURL.String())
+
+	// 发送请求获取 token
 	tokenResp, err := client.Get(reqURL.String())
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("请求 token 失败: %v", err)
 	}
 	defer tokenResp.Body.Close()
 
-	// 如果返回状态码不为 200，则视为失败
 	if tokenResp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("获取 token 请求返回状态码: %d", tokenResp.StatusCode)
+		return "", fmt.Errorf("获取 token 失败，状态码: %d", tokenResp.StatusCode)
 	}
 
-	var data map[string]interface{}
-	// 读取响应体
-	body, err := ioutil.ReadAll(tokenResp.Body)
-	if err != nil {
-		return "", err
-	}
-	// 解析 JSON 数据
-	err = json.Unmarshal(body, &data)
-	if err != nil {
-		return "", err
+	// 解析响应
+	var response struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
 	}
 
-	// 优先检查 token 字段，其次检查 access_token 字段
-	if token, ok := data["token"].(string); ok && token != "" {
-		return token, nil
+	if err := json.NewDecoder(tokenResp.Body).Decode(&response); err != nil {
+		return "", fmt.Errorf("解析 token 响应失败: %v", err)
 	}
-	if accessToken, ok := data["access_token"].(string); ok && accessToken != "" {
-		return accessToken, nil
+
+	// 返回 token
+	if response.Token != "" {
+		return response.Token, nil
 	}
-	return "", errors.New("未找到 token")
+	if response.AccessToken != "" {
+		return response.AccessToken, nil
+	}
+
+	return "", fmt.Errorf("响应中未找到有效的 token")
+}
+
+// isRedirect 判断状态码是否为重定向
+func isRedirect(statusCode int) bool {
+	switch statusCode {
+	case http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
+}
+
+// isResponseWritten 检查响应是否已经被写入
+func isResponseWritten(w http.ResponseWriter) bool {
+	if rw, ok := w.(interface{ Status() int }); ok {
+		return rw.Status() != 0
+	}
+	return false
 }

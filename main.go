@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"HubP/proxy"
 	"github.com/sirupsen/logrus"
@@ -29,7 +30,17 @@ type Config struct {
 // 全局配置变量
 var config Config
 
-// preprocessArgs 预处理命令行参数，将长参数转换为短参数，便于统一处理
+func init() {
+	// 配置日志格式
+	logrus.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp:   true,                      // 显示完整时间戳
+		TimestampFormat: "2006-01-02 15:04:05.000", // 自定义时间格式
+		DisableColors:   false,                     // 启用颜色输出
+		PadLevelText:    true,                      // 对齐日志级别文本
+	})
+}
+
+// preprocessArgs 预处理命令行参数，将长参数转换为短参数
 func preprocessArgs() {
 	// 定义长参数到短参数的映射关系
 	alias := map[string]string{
@@ -39,7 +50,7 @@ func preprocessArgs() {
 		"--disguise":  "-w",
 	}
 
-	// 构造新的参数列表，预分配容量以减少内存分配
+	// 构造新的参数列表，预分配容量
 	newArgs := make([]string, 0, len(os.Args))
 	newArgs = append(newArgs, os.Args[0])
 
@@ -58,20 +69,27 @@ func preprocessArgs() {
 	os.Args = newArgs
 }
 
-// usage 自定义 flag.Usage 函数，显示详细的帮助信息
+// usage 自定义帮助信息
 func usage() {
-	const helpText = `
-Help:
-    程序支持长参数和短参数形式：
-        -l, --listen       监听地址，例如 0.0.0.0 (默认值: 0.0.0.0)
-        -p, --port         监听端口，例如 18826 (默认值: 18826)
-        -ll, --log-level   日志级别，例如 debug, info, warn, error (默认值: info)
-        -w, --disguise     伪装网站 URL，例如 onlinealarmkur.com (默认值: onlinealarmkur.com)
+	const helpText = `HubP - Docker Hub 代理服务器
 
-Demo:
-    ./HubP -l 0.0.0.0 -p 18826 --log-level=debug --disguise=onlinealarmkur.com
-`
-	fmt.Fprintln(os.Stderr, helpText)
+参数说明:
+    -l, --listen       监听地址，例如 0.0.0.0 (默认值: 0.0.0.0)
+    -p, --port         监听端口，例如 18826 (默认值: 18826)
+    -ll, --log-level   日志级别，可选值: debug, info, warn, error (默认值: info)
+    -w, --disguise     伪装网站 URL，例如 www.bing.com (默认值: www.bing.com)
+
+使用示例:
+    ./HubP -l 0.0.0.0 -p 18826 -ll debug -w www.bing.com
+    ./HubP --listen=0.0.0.0 --port=18826 --log-level=debug --disguise=www.bing.com
+
+环境变量:
+    HUBP_LISTEN    - 监听地址
+    HUBP_PORT      - 监听端口
+    HUBP_LOG_LEVEL - 日志级别
+    HUBP_DISGUISE  - 伪装网站 URL`
+
+	fmt.Fprintf(os.Stderr, "%s\n", helpText)
 }
 
 func main() {
@@ -83,7 +101,7 @@ func main() {
 	defaultListenAddress := getEnv("HUBP_LISTEN", "0.0.0.0")
 	defaultPort := getEnvAsInt("HUBP_PORT", 18826)
 	defaultLogLevel := getEnv("HUBP_LOG_LEVEL", "debug")
-	defaultDisguiseURL := getEnv("HUBP_DISGUISE", "onlinealarmkur.com")
+	defaultDisguiseURL := getEnv("HUBP_DISGUISE", "www.bing.com")
 
 	// 定义命令行参数变量
 	flag.StringVar(&config.ListenAddress, "l", defaultListenAddress, "监听地址")
@@ -93,70 +111,96 @@ func main() {
 
 	// 解析命令行参数
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
-		usage()
-		os.Exit(1)
+		logrus.Fatal("解析命令行参数失败：", err)
 	}
 
 	// 设置日志级别
-	if level, err := logrus.ParseLevel(config.LogLevel); err != nil {
-		logrus.Warnf("无法解析日志级别 %s，使用默认级别 info", config.LogLevel)
-		logrus.SetLevel(logrus.InfoLevel)
-	} else {
-		logrus.SetLevel(level)
+	level, err := logrus.ParseLevel(config.LogLevel)
+	if err != nil {
+		logrus.Warnf("无效的日志级别 '%s'，使用默认级别 'info'", config.LogLevel)
+		level = logrus.InfoLevel
+	}
+	logrus.SetLevel(level)
+
+	// 输出启动信息
+	logrus.Info("============================================")
+	logrus.Infof("HubP Docker Hub 代理服务器 (版本: %s)", Version)
+	logrus.Info("============================================")
+	logrus.Infof("监听地址: %s", config.ListenAddress)
+	logrus.Infof("监听端口: %d", config.Port)
+	logrus.Infof("日志级别: %s", config.LogLevel)
+	logrus.Infof("伪装网站: %s", config.DisguiseURL)
+	logrus.Info("============================================")
+
+	// 创建自定义的 HTTP 服务器
+	server := &http.Server{
+		Addr:         fmt.Sprintf("%s:%d", config.ListenAddress, config.Port),
+		Handler:      http.HandlerFunc(handleRequest),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	// 输出配置信息
-	logrus.Infof("最终配置: %+v", config)
-	logrus.Infof("当前版本: %s", Version)
-
-	// 启动 HTTP 服务器
-	addr := fmt.Sprintf("%s:%d", config.ListenAddress, config.Port)
-	http.HandleFunc("/", handleRequest)
-	
-	logrus.Infof("服务器启动，监听 %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		logrus.Fatalf("服务器启动失败: %v", err)
+	// 启动服务器
+	logrus.Info("服务器启动中...")
+	if err := server.ListenAndServe(); err != nil {
+		logrus.Fatal("服务器启动失败: ", err)
 	}
 }
 
 // handleRequest 处理所有 HTTP 请求的入口函数
 func handleRequest(w http.ResponseWriter, r *http.Request) {
-	// 判断请求路径是否以 "/v2/" 开头
+	startTime := time.Now()
+	
+	// 添加请求日志
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.Debugf("[请求] %s %s %s", r.Method, r.URL.Path, r.RemoteAddr)
+	}
+
+	// 根据路径选择处理方式
 	if strings.HasPrefix(r.URL.Path, "/v2/") {
 		proxy.HandleProxy(w, r)
-		return
+	} else {
+		handleDisguise(w, r)
 	}
-	handleDisguise(w, r)
+
+	// 添加完成日志
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		duration := time.Since(startTime)
+		logrus.Debugf("[完成] %s %s (耗时: %v)", r.Method, r.URL.Path, duration)
+	}
 }
 
-// handleDisguise 处理伪装页面的反向代理，使用流式传输
+// handleDisguise 处理伪装页面的反向代理
 func handleDisguise(w http.ResponseWriter, r *http.Request) {
-	// 构造目标 URL
 	targetURL := &url.URL{
 		Scheme:   "https",
 		Host:     config.DisguiseURL,
 		Path:     r.URL.Path,
 		RawQuery: r.URL.RawQuery,
 	}
-	logrus.Debugf("伪装代理请求: %s %s", r.Method, targetURL.String())
+
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		logrus.Debugf("[伪装] 转发请求至: %s", targetURL.String())
+	}
 
 	// 创建新的 HTTP 请求
 	newReq, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
 	if err != nil {
-		http.Error(w, "创建代理请求失败", http.StatusInternalServerError)
-		logrus.Errorf("创建代理请求失败: %v", err)
+		logrus.Errorf("[伪装] 创建请求失败: %v", err)
+		http.Error(w, "内部服务器错误", http.StatusInternalServerError)
 		return
 	}
 
 	// 复制请求头
 	copyHeaders(newReq.Header, r.Header)
-	newReq.Header.Del("Accept-Encoding") // 防止压缩
+	newReq.Header.Del("Accept-Encoding") // 防止压缩响应
 
 	// 发起请求
 	resp, err := http.DefaultClient.Do(newReq)
 	if err != nil {
-		http.Error(w, "发起代理请求失败", http.StatusInternalServerError)
-		logrus.Errorf("发起代理请求失败: %v", err)
+		logrus.Errorf("[伪装] 请求失败: %v", err)
+		http.Error(w, "内部服务器错误", http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
@@ -165,13 +209,13 @@ func handleDisguise(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
-	// 使用 io.Copy 进行流式传输响应体
+	// 流式传输响应体
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		logrus.Errorf("传输响应体失败: %v", err)
+		logrus.Errorf("[伪装] 传输响应失败: %v", err)
 	}
 }
 
-// copyHeaders 复制 HTTP 头，使用更高效的方式
+// copyHeaders 复制 HTTP 头
 func copyHeaders(dst, src http.Header) {
 	for key, values := range src {
 		dst[key] = append([]string(nil), values...)

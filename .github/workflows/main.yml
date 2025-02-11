@@ -266,7 +266,8 @@ jobs:
 
           cd release
           zip_file="${{ env.BINARY_NAME }}-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip"
-          zip -9 "${zip_file}" -r "$(basename ${temp_dir})"
+          # 使用 -j 参数去除路径信息，确保解压后直接是二进制文件
+          zip -9 "${zip_file}" -j "$(basename ${temp_dir})/${binary_name}"
 
           echo "生成校验和..."
           sha256sum "${zip_file}" | tee -a "checksums-${{ matrix.os }}-${{ matrix.arch }}.txt"

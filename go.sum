@@ -1,15 +1,53 @@
+// 引入github.com/davecgh/go-spew包版本1.1.0
+// go-spew是一个用于深度打印Go数据结构的工具，通常用于调试，能够展示更详细的对象结构。
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+
+// 引入github.com/davecgh/go-spew包版本1.1.1
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+
+// 引入github.com/davecgh/go-spew包版本1.1.1的go.mod文件
+// go.mod文件用于描述模块的元数据和依赖关系。
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+
+// 引入github.com/pmezard/go-difflib包版本1.0.0
+// go-difflib是一个用于生成和比较文本差异的Go库。适用于进行字符串或文本比较。
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+
+// 引入github.com/pmezard/go-difflib包版本1.0.0的go.mod文件
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+
+// 引入github.com/sirupsen/logrus包版本1.9.3
+// logrus是一个流行的Go日志库，提供结构化的日志记录，可以配置不同的日志级别、格式和输出。
 github.com/sirupsen/logrus v1.9.3 h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=
+
+// 引入github.com/sirupsen/logrus包版本1.9.3的go.mod文件
 github.com/sirupsen/logrus v1.9.3/go.mod h1:naHLuLoDiP4jHNo9R0sCBMtWGeIprob74mVsIT4qYEQ=
+
+// 引入github.com/stretchr/objx包版本0.1.0的go.mod文件
+// objx是一个用于处理JSON和对象的Go包，提供了便利的API来访问复杂的嵌套数据。
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
+
+// 引入github.com/stretchr/testify包版本1.7.0
+// testify是一个用于单元测试的Go库，提供断言、模拟、测试套件等功能，增强测试的可读性和可维护性。
 github.com/stretchr/testify v1.7.0 h1:nwc3DEeHmmLAfoZucVR881uASk0Mfjw8xYJ99tb5CcY=
+
+// 引入github.com/stretchr/testify包版本1.7.0的go.mod文件
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+
+// 引入golang.org/x/sys包版本v0.0.0-20220715151400-c0bba94af5f8
+// golang.org/x/sys包提供对操作系统底层功能的访问，支持各平台的系统调用接口。
 golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 h1:0A+M6Uqn+Eje4kHMK80dtF3JCXC4ykBgQG4Fe06QRhQ=
+
+// 引入golang.org/x/sys包版本v0.0.0-20220715151400-c0bba94af5f8的go.mod文件
 golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
+
+// 引入gopkg.in/check.v1包版本0.0.0-20161208181325-20d25e280405的go.mod文件
+// check是一个Go的单元测试库，提供了比标准库更丰富的断言、测试套件功能。
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+
+// 引入gopkg.in/yaml.v3包版本v3.0.0-20200313102051-9f266ea9e77c
+// yaml.v3是一个Go语言的YAML解析和生成库，适用于处理YAML格式的数据。
 gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c h1:dUUwHk2QECo/6vqA44rthZ8ie2QXMNeKRTHCNY2nXvo=
+
+// 引入gopkg.in/yaml.v3包版本v3.0.0-20200313102051-9f266ea9e77c的go.mod文件
 gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=

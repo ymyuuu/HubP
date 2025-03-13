@@ -1,4 +1,4 @@
-// proxy.go
+// proxy/proxy.go
 package proxy
 
 import (
@@ -14,177 +14,264 @@ import (
 
 // 常量定义
 const (
-	targetHost = "registry-1.docker.io" // Docker Hub 的目标主机地址
+	registryHost   = "registry-1.docker.io" // Docker Registry 的主机地址
+	authHost       = "auth.docker.io"       // Docker Auth 的主机地址
+	cloudflareHost = "production.cloudflare.docker.com" // Docker Cloudflare 的主机地址
 )
 
-// 自定义 HTTP 客户端
+// 自定义 HTTP 客户端，用于所有请求
 var client = &http.Client{
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// 不自动跟随重定向，让我们自己处理
 		return http.ErrUseLastResponse
 	},
 }
 
-// HandleProxy 处理 Docker 相关代理请求
-func HandleProxy(w http.ResponseWriter, r *http.Request) {
-	// 构造目标 URL
+// HandleRegistryRequest 处理 Docker Registry 请求
+func HandleRegistryRequest(w http.ResponseWriter, r *http.Request) {
+	// 获取当前域名，用于设置认证头
+	currentDomain := r.Host
+
+	// 记录请求信息
+	logrus.Debugf("[Registry] 收到请求: %s %s", r.Method, r.URL.Path)
+
+	// 提取路径
+	path := strings.TrimPrefix(r.URL.Path, "/v2/")
+
+	// 修改 URL，将请求转发到 Docker Registry
 	targetURL := &url.URL{
 		Scheme:   "https",
-		Host:     targetHost,
-		Path:     r.URL.Path,
+		Host:     registryHost,
+		Path:     fmt.Sprintf("/v2/%s", path),
 		RawQuery: r.URL.RawQuery,
 	}
 
-	logrus.Debugf("[Docker] 收到请求: %s %s", r.Method, r.URL.Path)
+	// 复制请求头，并设置 Host
+	headers := CopyHttpHeaders(r.Header)
+	headers.Set("Host", registryHost)
+	headers.Del("Accept-Encoding") // 防止压缩响应
 
-	// 发起代理请求
-	if err := proxyRequest(w, r, targetURL.String()); err != nil {
-		logrus.Errorf("[Docker] 代理请求失败: %v", err)
-		if !isResponseWritten(w) {
-			http.Error(w, "服务器错误", http.StatusInternalServerError)
-		}
-	}
-}
-
-// proxyRequest 发起代理请求并处理响应
-func proxyRequest(w http.ResponseWriter, r *http.Request, targetURL string) error {
-	// 创建新的代理请求
-	newReq, err := http.NewRequest(r.Method, targetURL, r.Body)
+	// 创建新的请求
+	newReq, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		logrus.Errorf("[Registry] 创建请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
 	}
+	newReq.Header = headers
 
-	// 复制请求头
-	copyHeaders(newReq.Header, r.Header)
-	newReq.Header.Set("Host", targetHost)
-	newReq.Header.Del("Accept-Encoding")
-
-	logrus.Debugf("[Docker] 转发请求至: %s", targetURL)
-
-	// 发送请求
+	// 发送请求并获取响应
 	resp, err := client.Do(newReq)
 	if err != nil {
-		return fmt.Errorf("发送请求失败: %v", err)
+		logrus.Errorf("[Registry] 请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
 	}
 	defer resp.Body.Close()
 
 	// 处理 401 认证错误
 	if resp.StatusCode == http.StatusUnauthorized {
-		logrus.Debug("[Docker] 需要认证，尝试获取 token")
-		return handleAuthAndRetry(w, r, targetURL, resp)
+		logrus.Debug("[Registry] 需要认证，尝试获取 token")
+		// 处理认证
+		handleAuthChallenge(w, r, resp, targetURL.String(), currentDomain)
+		return
 	}
 
-	// 处理重定向响应
-	if isRedirect(resp.StatusCode) {
-		logrus.Debug("[Docker] 处理重定向响应")
-		return handleRedirect(w, r, resp, targetURL)
+	// 创建新的响应头
+	respHeaders := CopyHttpHeaders(resp.Header)
+
+	// 修改认证头，指向我们自己的代理服务
+	if authHeader := respHeaders.Get("WWW-Authenticate"); authHeader != "" {
+		respHeaders.Set("WWW-Authenticate", 
+			fmt.Sprintf(`Bearer realm="https://%s/auth/token", service="registry.docker.io"`, currentDomain))
 	}
 
-	// 写入常规响应
-	return writeResponse(w, resp)
+	// 返回修改后的响应
+	w.WriteHeader(resp.StatusCode)
+	for key, values := range respHeaders {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// 传输响应体
+	written, err := io.Copy(w, resp.Body)
+	if err != nil {
+		logrus.Errorf("[Registry] 传输响应失败: %v", err)
+		return
+	}
+
+	logrus.Debugf("[Registry] 响应完成 [状态码: %d] [大小: %.2f KB]", 
+		resp.StatusCode, float64(written)/1024)
 }
 
-// handleAuthAndRetry 处理认证并重试请求
-func handleAuthAndRetry(w http.ResponseWriter, r *http.Request, targetURL string, resp *http.Response) error {
+// HandleAuthRequest 处理 Docker Auth 请求
+func HandleAuthRequest(w http.ResponseWriter, r *http.Request) {
+	// 记录请求信息
+	logrus.Debugf("[Auth] 收到请求: %s %s", r.Method, r.URL.Path)
+
+	// 提取路径
+	path := strings.TrimPrefix(r.URL.Path, "/auth/")
+
+	// 修改 URL，将请求转发到 Docker Auth
+	targetURL := &url.URL{
+		Scheme:   "https",
+		Host:     authHost,
+		Path:     fmt.Sprintf("/%s", path),
+		RawQuery: r.URL.RawQuery,
+	}
+
+	// 复制请求头，并设置 Host
+	headers := CopyHttpHeaders(r.Header)
+	headers.Set("Host", authHost)
+	headers.Del("Accept-Encoding") // 防止压缩响应
+
+	// 创建新的请求
+	newReq, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
+	if err != nil {
+		logrus.Errorf("[Auth] 创建请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
+	}
+	newReq.Header = headers
+
+	// 发送请求并获取响应
+	resp, err := client.Do(newReq)
+	if err != nil {
+		logrus.Errorf("[Auth] 请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 返回响应
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// 传输响应体
+	written, err := io.Copy(w, resp.Body)
+	if err != nil {
+		logrus.Errorf("[Auth] 传输响应失败: %v", err)
+		return
+	}
+
+	logrus.Debugf("[Auth] 响应完成 [状态码: %d] [大小: %.2f KB]", 
+		resp.StatusCode, float64(written)/1024)
+}
+
+// HandleCloudflareRequest 处理 Docker Cloudflare 请求
+func HandleCloudflareRequest(w http.ResponseWriter, r *http.Request) {
+	// 记录请求信息
+	logrus.Debugf("[Cloudflare] 收到请求: %s %s", r.Method, r.URL.Path)
+
+	// 提取路径
+	path := strings.TrimPrefix(r.URL.Path, "/production-cloudflare/")
+
+	// 修改 URL，将请求转发到 Docker Cloudflare
+	targetURL := &url.URL{
+		Scheme:   "https",
+		Host:     cloudflareHost,
+		Path:     fmt.Sprintf("/%s", path),
+		RawQuery: r.URL.RawQuery,
+	}
+
+	// 复制请求头，并设置 Host
+	headers := CopyHttpHeaders(r.Header)
+	headers.Set("Host", cloudflareHost)
+	headers.Del("Accept-Encoding") // 防止压缩响应
+
+	// 创建新的请求
+	newReq, err := http.NewRequest(r.Method, targetURL.String(), r.Body)
+	if err != nil {
+		logrus.Errorf("[Cloudflare] 创建请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
+	}
+	newReq.Header = headers
+
+	// 发送请求并获取响应
+	resp, err := client.Do(newReq)
+	if err != nil {
+		logrus.Errorf("[Cloudflare] 请求失败: %v", err)
+		http.Error(w, "服务器错误", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 返回响应
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// 传输响应体
+	written, err := io.Copy(w, resp.Body)
+	if err != nil {
+		logrus.Errorf("[Cloudflare] 传输响应失败: %v", err)
+		return
+	}
+
+	logrus.Debugf("[Cloudflare] 响应完成 [状态码: %d] [大小: %.2f KB]", 
+		resp.StatusCode, float64(written)/1024)
+}
+
+// CopyHeaders 复制 HTTP 头
+func CopyHeaders(dst, src http.Header) {
+	for key, values := range src {
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+// CopyHttpHeaders 复制 HTTP 头并返回新的头集合
+func CopyHttpHeaders(src http.Header) http.Header {
+	dst := make(http.Header)
+	CopyHeaders(dst, src)
+	return dst
+}
+
+// handleAuthChallenge 处理认证挑战
+func handleAuthChallenge(w http.ResponseWriter, r *http.Request, resp *http.Response, targetURL, currentDomain string) {
 	// 获取认证参数
 	authHeader := resp.Header.Get("WWW-Authenticate")
 	authParams := parseAuth(authHeader)
 
-	if authParams["realm"] == "" || authParams["service"] == "" {
-		logrus.Debug("[Docker] 认证参数不完整，返回原始响应")
-		return writeResponse(w, resp)
+	// 修改认证头，指向我们自己的代理服务
+	modifiedAuthHeader := fmt.Sprintf(`Bearer realm="https://%s/auth/token", service="registry.docker.io"`, currentDomain)
+	if scope := authParams["scope"]; scope != "" {
+		modifiedAuthHeader += fmt.Sprintf(`, scope="%s"`, scope)
 	}
 
-	// 获取 token
-	token, err := fetchToken(authParams)
-	if err != nil {
-		logrus.Errorf("[Docker] 获取 token 失败: %v", err)
-		return writeResponse(w, resp)
-	}
-
-	logrus.Debug("[Docker] 获取 token 成功，重试请求")
-	return retryWithToken(w, r, targetURL, token)
-}
-
-// retryWithToken 使用 token 重试请求
-func retryWithToken(w http.ResponseWriter, r *http.Request, targetURL, token string) error {
-	// 创建新的认证请求
-	newReq, err := http.NewRequest(r.Method, targetURL, r.Body)
-	if err != nil {
-		return fmt.Errorf("创建认证请求失败: %v", err)
-	}
-
-	// 设置请求头
-	copyHeaders(newReq.Header, r.Header)
-	newReq.Header.Set("Host", targetHost)
-	newReq.Header.Set("Authorization", "Bearer "+token)
-	newReq.Header.Del("Accept-Encoding")
-
-	// 发送请求
-	resp, err := client.Do(newReq)
-	if err != nil {
-		return fmt.Errorf("发送认证请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 处理重定向
-	if isRedirect(resp.StatusCode) {
-		return handleRedirect(w, r, resp, targetURL)
-	}
-
-	return writeResponse(w, resp)
-}
-
-// handleRedirect 处理重定向请求
-func handleRedirect(w http.ResponseWriter, r *http.Request, resp *http.Response, targetURL string) error {
-	location := resp.Header.Get("Location")
-	if location == "" {
-		logrus.Debug("[Docker] 重定向响应缺少 Location 头")
-		return writeResponse(w, resp)
-	}
-
-	// 解析重定向 URL
-	redirectURL, err := url.Parse(location)
-	if err != nil {
-		return fmt.Errorf("解析重定向 URL 失败: %v", err)
-	}
-
-	baseURL, err := url.Parse(targetURL)
-	if err != nil {
-		return fmt.Errorf("解析基础 URL 失败: %v", err)
-	}
-
-	// 获取新的完整 URL
-	newURL := baseURL.ResolveReference(redirectURL)
-	logrus.Debugf("[Docker] 重定向至: %s", newURL.String())
-	
-	return proxyRequest(w, r, newURL.String())
-}
-
-// writeResponse 将响应写回客户端
-func writeResponse(w http.ResponseWriter, resp *http.Response) error {
 	// 复制响应头
-	copyHeaders(w.Header(), resp.Header)
+	for key, values := range resp.Header {
+		for _, value := range values {
+			if key == "WWW-Authenticate" {
+				w.Header().Add(key, modifiedAuthHeader)
+			} else {
+				w.Header().Add(key, value)
+			}
+		}
+	}
+
+	// 设置状态码
 	w.WriteHeader(resp.StatusCode)
 
-	// 流式传输响应体
+	// 传输响应体
 	written, err := io.Copy(w, resp.Body)
 	if err != nil {
-		return fmt.Errorf("写入响应体失败: %v", err)
+		logrus.Errorf("[Registry] 传输认证响应失败: %v", err)
+		return
 	}
 
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Debugf("[Docker] 响应完成 [状态码: %d] [大小: %.2f KB]", 
-			resp.StatusCode, float64(written)/1024)
-	}
-
-	return nil
-}
-
-// copyHeaders 复制 HTTP 头
-func copyHeaders(dst, src http.Header) {
-	for key, values := range src {
-		dst[key] = append([]string(nil), values...)
-	}
+	logrus.Debugf("[Registry] 认证响应完成 [状态码: %d] [大小: %.2f KB]", 
+		resp.StatusCode, float64(written)/1024)
 }
 
 // parseAuth 解析认证头
@@ -208,7 +295,7 @@ func parseAuth(header string) map[string]string {
 	return result
 }
 
-// fetchToken 从认证服务器获取 token
+// fetchToken 从认证服务器获取 token (保留以备需要)
 func fetchToken(authParams map[string]string) (string, error) {
 	// 构造认证 URL
 	reqURL, err := url.Parse(authParams["realm"])
@@ -224,7 +311,7 @@ func fetchToken(authParams map[string]string) (string, error) {
 	}
 	reqURL.RawQuery = query.Encode()
 
-	logrus.Debugf("[Docker] 请求 token: %s", reqURL.String())
+	logrus.Debugf("[Registry] 请求 token: %s", reqURL.String())
 
 	// 发送请求获取 token
 	tokenResp, err := client.Get(reqURL.String())
@@ -256,26 +343,4 @@ func fetchToken(authParams map[string]string) (string, error) {
 	}
 
 	return "", fmt.Errorf("响应中未找到有效的 token")
-}
-
-// isRedirect 判断状态码是否为重定向
-func isRedirect(statusCode int) bool {
-	switch statusCode {
-	case http.StatusMovedPermanently,
-		http.StatusFound,
-		http.StatusSeeOther,
-		http.StatusTemporaryRedirect,
-		http.StatusPermanentRedirect:
-		return true
-	default:
-		return false
-	}
-}
-
-// isResponseWritten 检查响应是否已经被写入
-func isResponseWritten(w http.ResponseWriter) bool {
-	if rw, ok := w.(interface{ Status() int }); ok {
-		return rw.Status() != 0
-	}
-	return false
 }

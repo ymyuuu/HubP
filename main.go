@@ -122,10 +122,14 @@ func main() {
 	// 输出启动信息
 	printStartupInfo()
 
+	// 设置路由
+	http.HandleFunc("/v2/", proxy.HandleRegistryRequest)
+	http.HandleFunc("/auth/", proxy.HandleAuthRequest)
+	http.HandleFunc("/production-cloudflare/", proxy.HandleCloudflareRequest)
+	http.HandleFunc("/", handleRoot)
+
 	// 启动服务器
 	addr := fmt.Sprintf("%s:%d", config.ListenAddress, config.Port)
-	http.HandleFunc("/", handleRequest)
-	
 	logrus.Info("服务器启动中...")
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		logrus.Fatal("服务器启动失败: ", err)
@@ -143,26 +147,24 @@ func printStartupInfo() {
 	logrus.Infof(" 监听端口: %d", config.Port)
 	logrus.Infof(" 日志级别: %s", config.LogLevel)
 	logrus.Infof(" 伪装网站: %s", config.DisguiseURL)
+	logrus.Info(" 支持路径:")
+	logrus.Info("   /v2/...        - Docker Registry API")
+	logrus.Info("   /auth/...      - Docker Auth API")
+	logrus.Info("   /production-cloudflare/... - Docker Cloudflare API")
 	logrus.Info(line)
 }
 
-// handleRequest 处理所有 HTTP 请求
-func handleRequest(w http.ResponseWriter, r *http.Request) {
-	// 构造请求日志前缀
-	prefix := fmt.Sprintf("[%s]", r.URL.Path)
-	
-	// DEBUG 级别打印详细请求信息
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Debugf("%s 收到请求 [%s %s] 来自 %s", 
-			prefix, r.Method, r.URL.String(), r.RemoteAddr)
+// handleRoot 处理根路径请求
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	// 如果是根路径，则返回 404
+	if r.URL.Path == "/" {
+		logrus.Debug("[根路径] 返回 404")
+		http.NotFound(w, r)
+		return
 	}
 
-	// 根据路径选择处理方式
-	if strings.HasPrefix(r.URL.Path, "/v2/") {
-		proxy.HandleProxy(w, r)
-	} else {
-		handleDisguise(w, r)
-	}
+	// 其他不匹配的路径，使用伪装网站处理
+	handleDisguise(w, r)
 }
 
 // handleDisguise 处理伪装页面请求
@@ -188,7 +190,8 @@ func handleDisguise(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 复制请求头
-	copyHeaders(newReq.Header, r.Header)
+	proxy.CopyHeaders(newReq.Header, r.Header)
+	newReq.Header.Set("Host", config.DisguiseURL)
 	newReq.Header.Del("Accept-Encoding") // 防止压缩响应
 
 	// 发送请求
@@ -201,7 +204,7 @@ func handleDisguise(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	// 复制响应头
-	copyHeaders(w.Header(), resp.Header)
+	proxy.CopyHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
 	// 流式传输响应体
@@ -212,15 +215,8 @@ func handleDisguise(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Debugf("[伪装] 响应完成 [状态码: %d] [大小: %.2f KB]", 
+		logrus.Debugf("[伪装] 响应完成 [状态码: %d] [大小: %.2f KB]",
 			resp.StatusCode, float64(written)/1024)
-	}
-}
-
-// copyHeaders 复制 HTTP 头
-func copyHeaders(dst, src http.Header) {
-	for key, values := range src {
-		dst[key] = append([]string(nil), values...)
 	}
 }
 

@@ -42,7 +42,7 @@ go build -o HubP main.go
 docker pull ymyuuu/hubp:latest
 
 # 运行容器
-docker run -d --name hubp -p 18826:18826 ymyuuu/hubp:latest
+docker run -d --name hubp -p 18184:18184 ymyuuu/hubp:latest
 ```
 
 ## 配置说明
@@ -54,21 +54,21 @@ HubP 支持命令行参数和环境变量两种配置方式:
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `-l, --listen` | 监听地址 | `0.0.0.0` |
-| `-p, --port` | 监听端口 | `18826` |
+| `-p, --port` | 监听端口 | `18184` |
 | `-ll, --log-level` | 日志级别 (debug/info/warn/error) | `info` |
 | `-w, --disguise` | 伪装网站 URL | `onlinealarmkur.com` |
 
 示例:
 
 ```bash
-./HubP -l 0.0.0.0 -p 18826 -ll debug -w onlinealarmkur.com
+./HubP -l 0.0.0.0 -p 18184 -ll debug -w onlinealarmkur.com
 ```
 
 ### 环境变量 (Docker)
 
 ```bash
 sudo docker run -d --restart unless-stopped --name HubP \
-  -p 18826:18826 \
+  -p 18184:18184 \
   -e HUBP_LOG_LEVEL=debug \
   -e HUBP_DISGUISE=onlinealarmkur.com \
   ymyuuu/hubp:latest
